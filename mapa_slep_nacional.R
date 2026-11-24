@@ -13,16 +13,22 @@
 ## ARCHIVOS (misma carpeta que el script):
 ##   - base_nacional_comunas_2015_2025.csv  (Mineduc, todas las comunas)
 ##   - planilla_unica_RM_2015_2025.xlsx     (opcional: datos completos de la RM)
-## SALIDA: mapa_slep_chile_solo_mapa.html (el Rmd genera mapa_slep_chile_piloto.html)
+## SALIDA: mapa.html, solo el mapa a página completa (el Rmd genera la versión con
+##         la nota metodológica, mapa_slep_chile_piloto.html)
 ## =============================================================================
 
 ## ---- configuracion ----
 archivo_nacional <- "base_nacional_comunas_2015_2025.csv"
 archivo_rm       <- "planilla_unica_RM_2015_2025.xlsx"   # si no está, la RM queda solo con matrícula
-archivo_salida   <- "mapa_slep_chile_solo_mapa.html"   # distinto del .html que genera el Rmd
+archivo_salida   <- "mapa.html"        # solo el mapa, a página completa (para el sitio web)
+link_metodologia <- "index.html"       # página con la nota metodológica (el Rmd tejido); "" = sin link
 
 # Comunas insulares que no se dibujan (alejan el zoom de su región); siguen en los datos
 comunas_no_dibujadas <- c("05201" = "Isla de Pascua", "05104" = "Juan Fernández")
+# Además se quitan las islas oceánicas que forman parte de otra comuna (las Desventuradas,
+# San Félix y San Ambrosio, son parte de la comuna de Valparaíso): sin esto, el zoom de la
+# región incluye 9° de océano y las comunas quedan diminutas
+longitud_minima <- -76
 
 colores_adm <- c("SLEP"        = "#2C5F6F",
                  "DAEM"        = "#D9C9A3",
@@ -89,7 +95,11 @@ if (file.exists(archivo_rm)) {
       f_simce4  = ifelse(as.character(año) %in% names(simce_sin_puntaje), "Sin SIMCE",
                          simce_txt(año, simce_4basico_lectura, simce_4basico_matematica)),
       f_simce2  = ifelse(as.character(año) %in% names(simce_sin_puntaje), "Sin SIMCE",
-                         simce_txt(año, simce_2medio_lectura, simce_2medio_matematica)))
+                         simce_txt(año, simce_2medio_lectura, simce_2medio_matematica)),
+      # valores numéricos para el gráfico de comparación
+      n_ingreso = ingreso_total_educ_pesos,
+      n_s4l = simce_4basico_lectura, n_s4m = simce_4basico_matematica,
+      n_s2l = simce_2medio_lectura,  n_s2m = simce_2medio_matematica)
   nac <- nac %>%
     mutate(k = normalizar(nombre_comuna)) %>%
     left_join(rm_extra, by = c("k", "año")) %>%
@@ -102,6 +112,8 @@ if (file.exists(archivo_rm)) {
 }
 for (v in c("extra", "f_ingreso", "f_deuda", "f_simce4", "f_simce2"))
   if (is.null(nac[[v]])) nac[[v]] <- NA_character_
+for (v in c("n_ingreso", "n_s4l", "n_s4m", "n_s2l", "n_s2m"))
+  if (is.null(nac[[v]])) nac[[v]] <- NA_real_
 
 # Nombres de región con tildes (chilemapas los trae sin tildes)
 nombres_region <- c("01" = "Tarapacá", "02" = "Antofagasta", "03" = "Atacama", "04" = "Coquimbo",
@@ -138,11 +150,36 @@ fichas <- comunas %>%
                  round(100 * matricula_publica / pmax(matricula_total, 1)), "%)"),
     ingreso = f_ingreso, deuda = f_deuda, simce4 = f_simce4, simce2 = f_simce2
   )
-fichas <- lapply(split(fichas, fichas$codigo_comuna), function(d) list(
-  nombre = d$nombre_comuna[1],
-  completa = !all(is.na(d$ingreso)),       # RM: con ingresos, deuda y SIMCE
-  filas = lapply(seq_len(nrow(d)), function(i)
-    as.list(d[i, c("anio", "adm", "mat", "ingreso", "deuda", "simce4", "simce2")]))))
+# Series numéricas para comparar comunas. El ingreso por estudiante de un SLEP se calcula
+# sobre la matrícula pública de TODO su territorio (el ingreso es del servicio completo)
+series <- comunas %>%
+  group_by(año, nombre_slep_g = ifelse(administracion == "SLEP", nombre_slep, NA)) %>%
+  mutate(mat_territorio = ifelse(is.na(nombre_slep_g), matricula_publica, sum(matricula_publica))) %>%
+  ungroup() %>%
+  arrange(codigo_comuna, año) %>%
+  group_by(codigo_comuna) %>%
+  mutate(g = if (any(administracion == "SLEP")) min(año[administracion == "SLEP"]) else NA_real_) %>%
+  ungroup() %>%
+  transmute(codigo_comuna, nombre_region, g, anio = año,
+            mat_pub = matricula_publica,
+            pct_pub = round(100 * matricula_publica / pmax(matricula_total, 1), 1),
+            ingreso = round(n_ingreso / 1e6),
+            ingreso_pe = round(n_ingreso / mat_territorio / 1e6, 2),
+            s4l = n_s4l, s4m = n_s4m, s2l = n_s2l, s2m = n_s2m)
+series <- split(series, series$codigo_comuna)
+
+fichas <- lapply(split(fichas, fichas$codigo_comuna), function(d) {
+  s <- series[[d$codigo_comuna[1]]]
+  list(
+    nombre = d$nombre_comuna[1],
+    region = s$nombre_region[1],
+    g = if (is.na(s$g[1])) NULL else s$g[1],     # año de traspaso a SLEP
+    completa = !all(is.na(d$ingreso)),           # RM: con ingresos, deuda y SIMCE
+    filas = lapply(seq_len(nrow(d)), function(i)
+      as.list(d[i, c("anio", "adm", "mat", "ingreso", "deuda", "simce4", "simce2")])),
+    serie = as.list(s[c("anio", "mat_pub", "pct_pub", "ingreso", "ingreso_pe",
+                        "s4l", "s4m", "s2l", "s2m")]))
+})
 
 ## ---- regiones (resumen por año) ----
 regiones <- comunas %>%
@@ -181,10 +218,17 @@ a_coords <- function(g) {
 }
 a_lista <- function(sfobj) setNames(lapply(st_geometry(sfobj), a_coords), sfobj$id)
 
+sin_islas <- function(g) {
+  partes <- st_cast(st_sfc(g), "POLYGON")
+  lejos  <- vapply(partes, function(p) st_bbox(p)[["xmin"]] < longitud_minima, logical(1))
+  if (!any(lejos)) return(g)
+  st_combine(partes[!lejos])[[1]]
+}
 geo_com <- st_as_sf(mapa_comunas) %>%
   filter(!codigo_comuna %in% names(comunas_no_dibujadas)) %>%
-  select(id = codigo_comuna, region = codigo_region) %>%
-  st_make_valid()
+  select(id = codigo_comuna, region = codigo_region)
+st_geometry(geo_com) <- st_sfc(lapply(st_geometry(geo_com), sin_islas), crs = st_crs(geo_com))
+geo_com <- st_make_valid(geo_com)
 # Regiones = unión de sus comunas (no depende de rmapshaper)
 geo_reg <- geo_com %>% group_by(id = region) %>% summarise(.groups = "drop")
 
@@ -207,7 +251,7 @@ datos_js <- list(
   nombres_reg  = setNames(as.list(unique(regiones$nombre_region)), unique(regiones$codigo_region)),
   colores      = as.list(colores_adm),
   fichas       = fichas,
-  no_dibujadas = unname(comunas_no_dibujadas)
+  no_dibujadas = c(unname(comunas_no_dibujadas), "las islas Desventuradas")
 )
 
 ## ---- mapa ----
@@ -218,11 +262,14 @@ widget <- plot_ly(type = "scatter", mode = "lines", x = numeric(0), y = numeric(
          margin = list(l = 0, r = 0, t = 10, b = 0),
          hoverlabel = list(bgcolor = "#FAF7F0", align = "left",
                            font = list(family = "Titillium Web", size = 12))) %>%
-  config(displayModeBar = FALSE)
+  # Botones de zoom (+, −, encuadre inicial) para comunas pequeñas; doble clic también
+  # vuelve al encuadre de la región. En celular se puede además pellizcar la pantalla
+  config(displaylogo = FALSE, displayModeBar = TRUE, scrollZoom = FALSE,
+         modeBarButtons = list(list("zoomIn2d", "zoomOut2d", "resetScale2d")))
 
 js <- "
 function(el, x, D) {
-  var gd = el, estado = {anio: D.anios[D.anios.length - 1], region: null, comuna: null};
+  var gd = el, estado = {anio: D.anios[D.anios.length - 1], region: null, comuna: null, comparar: [], variable: 'mat_pub'};
   el.style.width = '100%'; el.style.maxWidth = '100%';   // en el Rmd el widget trae un ancho fijo
   // ---- barra de controles: volver, título, slider de año, leyenda ----
   var barra = document.createElement('div');
@@ -254,7 +301,8 @@ function(el, x, D) {
     var fijo = 'position:sticky;left:0;background:inherit;';
     var h = '<div style=\"display:flex;justify-content:space-between;align-items:baseline;gap:8px\">' +
       '<b style=\"font-size:16px;color:#2C5F6F\">' + F.nombre + '</b>' +
-      '<a href=\"#\" class=\"cerrar\" style=\"color:#888;text-decoration:none;white-space:nowrap\">✕ cerrar</a></div>' +
+      '<span style=\"white-space:nowrap\">' + botonComparar() +
+      ' <a href=\"#\" class=\"cerrar\" style=\"color:#888;text-decoration:none;margin-left:10px\">✕ cerrar</a></span></div>' +
       '<div style=\"color:#777;font-size:12px;margin:2px 0 6px\">Trayectoria ' + D.anios[0] + '-' + D.anios[D.anios.length - 1] +
       '; el año del control queda destacado.' + (F.completa ? ' Ingresos y deuda de un SLEP corresponden al servicio completo.' : '') +
       '</div><div style=\"overflow-x:auto;-webkit-overflow-scrolling:touch\">' +
@@ -271,6 +319,113 @@ function(el, x, D) {
     ficha.innerHTML = h + '</tbody></table></div>';
     ficha.style.display = '';
     ficha.querySelector('.cerrar').onclick = function(e) { e.preventDefault(); estado.comuna = null; dibujar(); };
+    var bc = ficha.querySelector('.comparar');
+    if (bc) bc.onclick = function() {
+      var i = estado.comparar.indexOf(estado.comuna);
+      if (i >= 0) estado.comparar.splice(i, 1);
+      else if (estado.comparar.length < MAX_COMP) estado.comparar.push(estado.comuna);
+      renderFicha(); renderComp();
+      if (estado.comparar.length) comp.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    };
+  }
+
+  // ---- comparación de comunas (hasta 4, de cualquier región) ----
+  var MAX_COMP = 4, COLORES = ['#2C5F6F', '#D9772B', '#7A5195', '#5E9C46'];
+  var VARIABLES = {
+    mat_pub:    {t: 'Matrícula pública', u: 'estudiantes'},
+    pct_pub:    {t: '% de la matrícula en establecimientos públicos', u: '%'},
+    ingreso:    {t: 'Ingresos en educación (millones de $ nominales)', u: 'MM$', rm: true},
+    ingreso_pe: {t: 'Ingreso por estudiante público (millones de $ nominales)', u: 'MM$', rm: true},
+    s4l: {t: 'SIMCE 4° básico Lectura', u: 'puntos', rm: true},
+    s4m: {t: 'SIMCE 4° básico Matemática', u: 'puntos', rm: true},
+    s2l: {t: 'SIMCE 2° medio Lectura', u: 'puntos', rm: true},
+    s2m: {t: 'SIMCE 2° medio Matemática', u: 'puntos', rm: true}
+  };
+  function botonComparar() {
+    var esta = estado.comparar.indexOf(estado.comuna) >= 0, lleno = estado.comparar.length >= MAX_COMP;
+    var txt = esta ? '✓ En comparación' : (lleno ? 'Máximo ' + MAX_COMP + ' comunas' : '+ Comparar');
+    return '<button class=\"comparar\"' + (!esta && lleno ? ' disabled' : '') +
+      ' style=\"font-family:inherit;font-size:12.5px;cursor:pointer;border-radius:4px;padding:2px 9px;' +
+      'border:1px solid #2C5F6F;' + (esta ? 'background:#2C5F6F;color:#fff' : 'background:#fff;color:#2C5F6F') + '\">' + txt + '</button>';
+  }
+  var comp = document.createElement('div');
+  comp.style.cssText = ficha.style.cssText; comp.style.display = 'none';
+  ficha.parentNode.insertBefore(comp, ficha.nextSibling);
+  function renderComp() {
+    var L = estado.comparar;
+    if (!L.length) { comp.style.display = 'none'; comp.innerHTML = ''; return; }
+    var a = String(estado.anio), F = L.map(function(c) { return D.fichas[c]; });
+    var hayRM = F.some(function(f) { return f.completa; });
+    if (VARIABLES[estado.variable].rm && !hayRM) estado.variable = 'mat_pub';
+    var chips = L.map(function(c, i) {
+      return '<span style=\"display:inline-flex;align-items:center;gap:4px;margin:2px 8px 2px 0;white-space:nowrap\">' +
+        '<span style=\"width:10px;height:10px;border-radius:2px;background:' + COLORES[i] + '\"></span>' + D.fichas[c].nombre +
+        ' <a href=\"#\" data-quitar=\"' + c + '\" style=\"color:#888;text-decoration:none\">✕</a></span>';
+    }).join('');
+    var fila = function(et, f) {
+      return '<tr style=\"border-bottom:1px solid #E5DFD3\"><th style=\"padding:5px 8px;text-align:left;white-space:nowrap;' +
+        'position:sticky;left:0;background:#FAF7F0\">' + et + '</th>' +
+        F.map(function(x) { return '<td style=\"padding:5px 8px;white-space:nowrap\">' + esc(f(x)) + '</td>'; }).join('') + '</tr>';
+    };
+    var delAnio = function(x) { return x.filas.filter(function(r) { return String(r.anio) === a; })[0] || {}; };
+    var guion = function(x, v) { return x.completa ? v : '—'; };
+    var h = '<div style=\"display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap\">' +
+      '<b style=\"font-size:16px;color:#2C5F6F\">Comparación de comunas · ' + a + '</b>' +
+      '<a href=\"#\" class=\"limpiar\" style=\"color:#888;text-decoration:none\">Limpiar</a></div>' +
+      '<div style=\"margin:4px 0 8px\">' + chips + '</div>' +
+      '<div style=\"overflow-x:auto;-webkit-overflow-scrolling:touch\"><table style=\"border-collapse:collapse;font-size:12.5px;width:100%\">' +
+      '<thead><tr style=\"border-bottom:2px solid #2C5F6F\"><th style=\"position:sticky;left:0;background:#FAF7F0\"></th>' +
+      F.map(function(x, i) { return '<th style=\"padding:5px 8px;text-align:left;white-space:nowrap;color:' + COLORES[i] + '\">' + x.nombre + '</th>'; }).join('') +
+      '</tr></thead><tbody>' +
+      fila('Región', function(x) { return x.region; }) +
+      fila('Administración', function(x) { return delAnio(x).adm; }) +
+      fila('Traspaso a SLEP', function(x) { return x.g || 'Sin SLEP a ' + D.anios[D.anios.length - 1]; }) +
+      fila('Matrícula pública', function(x) { return delAnio(x).mat; }) +
+      (hayRM ? fila('Ingresos educación', function(x) { return guion(x, delAnio(x).ingreso); }) +
+               fila('Deuda flotante', function(x) { return guion(x, delAnio(x).deuda); }) +
+               fila('SIMCE 4° básico', function(x) { return guion(x, delAnio(x).simce4); }) +
+               fila('SIMCE 2° medio', function(x) { return guion(x, delAnio(x).simce2); }) : '') +
+      '</tbody></table></div>' +
+      '<div style=\"display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0 0\"><span>Trayectoria:</span>' +
+      '<select class=\"variable\" style=\"font-family:inherit;font-size:13px;max-width:100%\">' +
+      Object.keys(VARIABLES).filter(function(k) { return hayRM || !VARIABLES[k].rm; }).map(function(k) {
+        return '<option value=\"' + k + '\"' + (k === estado.variable ? ' selected' : '') + '>' + VARIABLES[k].t + '</option>';
+      }).join('') + '</select></div>' +
+      '<div class=\"grafico\" style=\"width:100%;height:320px\"></div>' +
+      '<div style=\"color:#777;font-size:12px\">Rombo: año de traspaso a SLEP. Línea vertical: año del control.' +
+      (VARIABLES[estado.variable].rm ? ' Por ahora estos datos solo existen para la Región Metropolitana.' : '') +
+      (estado.variable.indexOf('ingreso') === 0 ? ' En un SLEP, el ingreso es del servicio completo; el ingreso por estudiante usa la matrícula pública de todo su territorio.' : '') +
+      (estado.variable.charAt(0) === 's' ? ' Sin SIMCE comparable 2019-2021.' : '') + '</div>';
+    comp.innerHTML = h; comp.style.display = '';
+    comp.querySelector('.limpiar').onclick = function(e) { e.preventDefault(); estado.comparar = []; renderFicha(); renderComp(); };
+    comp.querySelectorAll('[data-quitar]').forEach(function(x) {
+      x.onclick = function(e) { e.preventDefault(); estado.comparar.splice(estado.comparar.indexOf(this.getAttribute('data-quitar')), 1); renderFicha(); renderComp(); };
+    });
+    comp.querySelector('.variable').onchange = function() { estado.variable = this.value; renderComp(); };
+    var v = estado.variable, trazos = [];
+    F.forEach(function(x, i) {
+      var S = x.serie, y = S[v];
+      trazos.push({type: 'scatter', mode: 'lines+markers', x: S.anio, y: y, name: x.nombre, connectgaps: false,
+        line: {color: COLORES[i], width: 2.5}, marker: {color: COLORES[i], size: 6},
+        hovertemplate: x.nombre + ', %{x}: %{y:,}<extra></extra>'});
+      if (x.g) {
+        var j = S.anio.indexOf(x.g);
+        if (j >= 0 && y[j] !== null && y[j] !== undefined)
+          trazos.push({type: 'scatter', mode: 'markers', x: [x.g], y: [y[j]], showlegend: false,
+            marker: {symbol: 'diamond', size: 13, color: COLORES[i], line: {color: '#fff', width: 1.5}},
+            hovertemplate: x.nombre + ': traspaso a SLEP en ' + x.g + '<extra></extra>'});
+      }
+    });
+    var div = comp.querySelector('.grafico');
+    Plotly.react(div, trazos, {
+      margin: {l: 56, r: 12, t: 10, b: 36}, font: {family: 'Titillium Web, sans-serif', size: 12},
+      paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', showlegend: false,
+      separators: ',.', hovermode: 'closest',
+      xaxis: {dtick: comp.clientWidth < 520 ? 2 : 1, tickangle: 0, range: [D.anios[0] - 0.4, D.anios[D.anios.length - 1] + 0.4], fixedrange: true, gridcolor: '#EEE'},
+      yaxis: {title: {text: VARIABLES[v].u}, fixedrange: true, gridcolor: '#E5E5E5', zeroline: false},
+      shapes: [{type: 'line', x0: estado.anio, x1: estado.anio, yref: 'paper', y0: 0, y1: 1,
+                line: {color: '#999', width: 1, dash: 'dot'}}]
+    }, {displayModeBar: false, responsive: true});
   }
   var $ = function(id) { return barra.querySelector('#' + id); };
 
@@ -299,7 +454,9 @@ function(el, x, D) {
     // Alto según la forma de lo que se dibuja: en celular una región ancha no deja
     // franjas vacías arriba y abajo; Chile completo sigue siendo alto
     var ancho = gd.clientWidth || 760, prop = (y1 - y0) / ((x1 - x0) * Math.cos(lat));
-    var alto = Math.max(320, Math.min(820, Math.round(ancho * prop) + 20));
+    // tope: alto de la ventana menos la barra de controles (entre 560 y 1000 px)
+    var tope = Math.max(560, Math.min(1000, (window.innerHeight || 900) - 130));
+    var alto = Math.max(320, Math.min(tope, Math.round(ancho * prop) + 20));
     return {height: alto, xaxis: {visible: false, range: [x0, x1], fixedrange: false},
             yaxis: {visible: false, range: [y0, y1], scaleanchor: 'x', scaleratio: 1 / Math.cos(lat)}};
   }
@@ -331,16 +488,19 @@ function(el, x, D) {
       $('volver').style.display = '';
       $('leyenda').innerHTML = Object.keys(D.colores).map(function(k) { return caja(D.colores[k], k); }).join('');
       nota.innerHTML = (estado.region === '05' ? 'No se dibujan ' + D.no_dibujadas.join(' ni ') +
-        ' (comunas insulares). ' : '') +
+        ' (islas oceánicas). ' : '') +
         (estado.region === '13' ? 'RM: incluye ingresos, deuda flotante y SIMCE de la planilla única.'
                                 : 'Fuera de la RM, por ahora solo administración y matrícula (Mineduc).') +
         ' Haz clic en una comuna para ver su ficha.';
     }
     gd._ids = ids;
-    var lay = Object.assign({}, gd.layout, ejes(trazos), {dragmode: 'pan', autosize: false, width: el.clientWidth || 760});
+    var lay = Object.assign({}, gd.layout, ejes(trazos), {dragmode: 'pan', autosize: false, width: el.clientWidth || 760,
+                     // el zoom se mantiene al mover el año y se reinicia al cambiar de región
+                     uirevision: estado.region || 'chile'});
     el.style.height = lay.height + 'px';   // el contenedor del widget acompaña al alto
     Plotly.react(gd, trazos, lay);
     renderFicha();
+    renderComp();
   }
 
   $('anio').addEventListener('input', function() { estado.anio = +this.value; dibujar(); });
@@ -361,14 +521,32 @@ widget <- htmlwidgets::onRender(widget, js, data = datos_js)
 
 ## ---- exportar ----
 exportar_mapa <- function(w, archivo) {
+  # Página solo con el mapa: sin la estructura de informe, a todo el ancho
+  # (hasta 1200 px), con un encabezado mínimo y un link a la nota metodológica
+  encabezado <- htmltools::tags$div(
+    style = paste("font-family:'Titillium Web',sans-serif;display:flex;flex-wrap:wrap;",
+                  "align-items:baseline;justify-content:space-between;gap:4px 16px;margin:0 0 6px"),
+    htmltools::tags$span(style = "font-size:19px;font-weight:600;color:#2C5F6F",
+                         "Mapa interactivo SLEP · Chile"),
+    if (nzchar(link_metodologia))
+      htmltools::tags$a(href = link_metodologia, target = "_blank",
+                        style = "font-size:13px;color:#2C5F6F",
+                        "Nota metodológica y fuentes →"))
   w <- htmlwidgets::prependContent(w,
     # sin esta línea los celulares muestran la página a ~980 px de ancho, achicada
     htmltools::tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
     htmltools::tags$link(
-    rel = "stylesheet",
-    href = "https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600&display=swap"))
+      rel = "stylesheet",
+      href = "https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600&display=swap"),
+    htmltools::tags$style(htmltools::HTML(
+      "body{background:#fff;}
+       body>div{max-width:1200px;margin-left:auto;margin-right:auto;}")),
+    encabezado)
+  w$sizingPolicy$browser$fill <- FALSE      # que no ocupe la ventana en modo absoluto
+  w$sizingPolicy$browser$padding <- 14       # margen de la página (htmlwidgets lo aplica al body)
   auto <- requireNamespace("rmarkdown", quietly = TRUE) && rmarkdown::pandoc_available()
-  htmlwidgets::saveWidget(w, archivo, selfcontained = auto, title = "Mapa SLEP Chile (piloto)")
+  htmlwidgets::saveWidget(w, archivo, selfcontained = auto, title = "Mapa interactivo SLEP · Chile")
   message("Mapa guardado en: ", normalizePath(archivo))
 }
+
 if (!isTRUE(getOption("knitr.in.progress"))) exportar_mapa(widget, archivo_salida)
