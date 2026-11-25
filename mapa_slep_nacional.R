@@ -74,7 +74,11 @@ if (file.exists(archivo_rm)) {
   simce_txt <- function(a, l, m) ifelse(as.character(a) %in% names(simce_sin_puntaje),
     unname(simce_sin_puntaje[as.character(a)]),
     paste0("L ", coalesce(as.character(l), "s/d"), " · M ", coalesce(as.character(m), "s/d")))
+  # Montos en pesos reales de 2025 (columnas *_pesos_2025 de la planilla, deflactadas con
+  # el IPC promedio anual); los nominales quedan en la planilla como registro de la fuente
   rm_extra <- readxl::read_excel(archivo_rm, sheet = hoja) %>%
+    mutate(ingreso_total_educ_pesos = ingreso_total_educ_pesos_2025,
+           deuda_flotante_educ_devengado = deuda_flotante_educ_devengado_pesos_2025) %>%
     transmute(
       k = normalizar(comuna), año, comuna_rm = comuna,
       adm_rm = case_when(!is.na(slep) ~ "SLEP",
@@ -82,8 +86,8 @@ if (file.exists(archivo_rm)) {
                          TRUE ~ "DAEM"),
       slep_rm = slep,
       extra = paste0(
-        "<b>Ingresos en educación:</b> ", coalesce(fmt_millones(ingreso_total_educ_pesos), "Sin dato"), "<br>",
-        "<b>Deuda flotante:</b> ", coalesce(fmt_millones(deuda_flotante_educ_devengado), "Sin dato"), "<br>",
+        "<b>Ingresos en educación ($ de 2025):</b> ", coalesce(fmt_millones(ingreso_total_educ_pesos), "Sin dato"), "<br>",
+        "<b>Deuda flotante ($ de 2025):</b> ", coalesce(fmt_millones(deuda_flotante_educ_devengado), "Sin dato"), "<br>",
         "<b>SIMCE 4° básico:</b> ", simce_txt(año, simce_4basico_lectura, simce_4basico_matematica), "<br>",
         "<b>SIMCE 2° medio:</b> ", simce_txt(año, simce_2medio_lectura, simce_2medio_matematica),
         ifelse(!is.na(slep), "<br><i>Ingresos y deuda: SLEP completo</i>", "")),
@@ -308,7 +312,7 @@ function(el, x, D) {
       '</div><div style=\"overflow-x:auto;-webkit-overflow-scrolling:touch\">' +
       '<table style=\"border-collapse:collapse;font-size:12.5px;width:100%\"><thead><tr style=\"border-bottom:2px solid #2C5F6F;background:#FAF7F0\">' +
       th('Año', fijo) + th('Administración') + th('Matrícula pública') +
-      (F.completa ? th('Ingresos educación') + th('Deuda flotante') + th('SIMCE 4° básico') + th('SIMCE 2° medio') : '') +
+      (F.completa ? th('Ingresos educación ($ 2025)') + th('Deuda flotante ($ 2025)') + th('SIMCE 4° básico') + th('SIMCE 2° medio') : '') +
       '</tr></thead><tbody>';
     F.filas.forEach(function(r) {
       var act = String(r.anio) === a, bg = act ? '#E3ECEE' : '#FAF7F0';
@@ -334,8 +338,8 @@ function(el, x, D) {
   var VARIABLES = {
     mat_pub:    {t: 'Matrícula pública', u: 'estudiantes'},
     pct_pub:    {t: '% de la matrícula en establecimientos públicos', u: '%'},
-    ingreso:    {t: 'Ingresos en educación (millones de $ nominales)', u: 'MM$', rm: true},
-    ingreso_pe: {t: 'Ingreso por estudiante público (millones de $ nominales)', u: 'MM$', rm: true},
+    ingreso:    {t: 'Ingresos en educación (millones de $ de 2025)', u: 'MM$ de 2025', rm: true},
+    ingreso_pe: {t: 'Ingreso por estudiante público (millones de $ de 2025)', u: 'MM$ de 2025', rm: true},
     s4l: {t: 'SIMCE 4° básico Lectura', u: 'puntos', rm: true},
     s4m: {t: 'SIMCE 4° básico Matemática', u: 'puntos', rm: true},
     s2l: {t: 'SIMCE 2° medio Lectura', u: 'puntos', rm: true},
@@ -381,8 +385,8 @@ function(el, x, D) {
       fila('Administración', function(x) { return delAnio(x).adm; }) +
       fila('Traspaso a SLEP', function(x) { return x.g || 'Sin SLEP a ' + D.anios[D.anios.length - 1]; }) +
       fila('Matrícula pública', function(x) { return delAnio(x).mat; }) +
-      (hayRM ? fila('Ingresos educación', function(x) { return guion(x, delAnio(x).ingreso); }) +
-               fila('Deuda flotante', function(x) { return guion(x, delAnio(x).deuda); }) +
+      (hayRM ? fila('Ingresos educación ($ 2025)', function(x) { return guion(x, delAnio(x).ingreso); }) +
+               fila('Deuda flotante ($ 2025)', function(x) { return guion(x, delAnio(x).deuda); }) +
                fila('SIMCE 4° básico', function(x) { return guion(x, delAnio(x).simce4); }) +
                fila('SIMCE 2° medio', function(x) { return guion(x, delAnio(x).simce2); }) : '') +
       '</tbody></table></div>' +
