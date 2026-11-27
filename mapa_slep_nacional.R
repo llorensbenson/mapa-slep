@@ -7,19 +7,20 @@
 ##   - Nivel región: color según % de la matrícula pública que está en SLEP.
 ##   - Nivel comuna: color según quién administra la educación pública
 ##     (SLEP, DAEM o Corporación Municipal), con hover por comuna.
-##   - Región Metropolitana: además trae ingresos, deuda flotante y SIMCE
-##     desde la planilla única (es la región con datos completos por ahora).
+##   - En el hover, la ficha y la comparación: ingresos, deuda flotante y SIMCE
+##     desde la planilla única nacional (todas las comunas, pesos de 2025).
 ##
 ## ARCHIVOS (misma carpeta que el script):
 ##   - base_nacional_comunas_2015_2025.csv  (Mineduc, todas las comunas)
-##   - planilla_unica_RM_2015_2025.xlsx     (opcional: datos completos de la RM)
+##   - planilla_unica_Chile_2015_2025.xlsx  (ingresos, deuda flotante y SIMCE, pesos de 2025)
 ## SALIDA: mapa.html, solo el mapa a página completa (el Rmd genera la versión con
 ##         la nota metodológica, mapa_slep_chile_piloto.html)
 ## =============================================================================
 
 ## ---- configuracion ----
 archivo_nacional <- "base_nacional_comunas_2015_2025.csv"
-archivo_rm       <- "planilla_unica_RM_2015_2025.xlsx"   # si no está, la RM queda solo con matrícula
+# Planilla con ingresos, deuda y SIMCE: la nacional (o, si no está, la de la RM)
+archivo_rm       <- if (file.exists("planilla_unica_Chile_2015_2025.xlsx")) "planilla_unica_Chile_2015_2025.xlsx" else "planilla_unica_RM_2015_2025.xlsx"
 archivo_salida   <- "mapa.html"        # solo el mapa, a página completa (para el sitio web)
 link_metodologia <- "index.html"       # página con la nota metodológica (el Rmd tejido); "" = sin link
 
@@ -39,6 +40,7 @@ simce_sin_puntaje <- c("2019" = "Sin SIMCE comparable ese año",
                        "2021" = "No hubo SIMCE ese año (pandemia)")
 
 ## ---- paquetes ----
+# Usa el pipe nativo de R (|>), disponible desde R 4.1
 paquetes <- c("readxl", "dplyr", "sf", "plotly", "htmlwidgets", "htmltools",
               "jsonlite", "stringi", "chilemapas")
 faltan <- paquetes[!vapply(paquetes, requireNamespace, logical(1), quietly = TRUE)]
@@ -65,37 +67,45 @@ fmt_millones <- function(x) case_when(
   abs(x) < 1e6 ~ paste0("$", fmt_num(round(x))),
   TRUE ~ paste0("$", fmt_num(round(x / 1e6)), " millones"))
 
-# Datos completos de la RM (si está la planilla): se usa su clasificación
-# administrativa y se agregan ingresos, deuda y SIMCE al hover
+# Datos de la planilla única (nacional o RM): se usa su clasificación administrativa
+# y se agregan ingresos, deuda y SIMCE al hover
 rm_extra <- NULL
 if (file.exists(archivo_rm)) {
-  hoja <- grep("^Base RM", readxl::excel_sheets(archivo_rm), value = TRUE)[1]
+  hoja <- grep("^Base", readxl::excel_sheets(archivo_rm), value = TRUE)[1]
   normalizar <- function(x) gsub("[^A-Z]", "", toupper(stringi::stri_trans_general(x, "Latin-ASCII")))
+  txt_deuda <- function(v, mod, corto = FALSE) case_when(
+    !is.na(v) ~ fmt_millones(v),
+    grepl("^Corporaci", mod) ~ if (corto) "No registrada (Corp.)" else "No registrada (Corporación: fuera de la base de Contraloría)",
+    grepl("sin deuda", mod) ~ "$0",                     # sin ítem 34.07 ese año = cero
+    grepl("sin área", mod) ~ "No registrada",
+    TRUE ~ if (corto) "s/d" else "Sin dato")
   simce_txt <- function(a, l, m) ifelse(as.character(a) %in% names(simce_sin_puntaje),
     unname(simce_sin_puntaje[as.character(a)]),
     paste0("L ", coalesce(as.character(l), "s/d"), " · M ", coalesce(as.character(m), "s/d")))
   # Montos en pesos reales de 2025 (columnas *_pesos_2025 de la planilla, deflactadas con
   # el IPC promedio anual); los nominales quedan en la planilla como registro de la fuente
-  rm_extra <- readxl::read_excel(archivo_rm, sheet = hoja) %>%
+  planilla <- readxl::read_excel(archivo_rm, sheet = hoja)
+  rm_extra <- planilla |>
+    mutate(k = if ("codigo_comuna" %in% names(planilla)) codigo_comuna else normalizar(comuna)) |>
     mutate(ingreso_total_educ_pesos = ingreso_total_educ_pesos_2025,
-           deuda_flotante_educ_devengado = deuda_flotante_educ_devengado_pesos_2025) %>%
+           deuda_flotante_educ_devengado = deuda_flotante_educ_devengado_pesos_2025) |>
     transmute(
-      k = normalizar(comuna), año, comuna_rm = comuna,
+      k, año, comuna_rm = comuna,
       adm_rm = case_when(!is.na(slep) ~ "SLEP",
                          grepl("^Corporaci", modalidad_administrativa) ~ "Corporación",
                          TRUE ~ "DAEM"),
       slep_rm = slep,
       extra = paste0(
         "<b>Ingresos en educación ($ de 2025):</b> ", coalesce(fmt_millones(ingreso_total_educ_pesos), "Sin dato"), "<br>",
-        "<b>Deuda flotante ($ de 2025):</b> ", coalesce(fmt_millones(deuda_flotante_educ_devengado), "Sin dato"), "<br>",
+        "<b>Deuda flotante ($ de 2025):</b> ", txt_deuda(deuda_flotante_educ_devengado, modalidad_administrativa), "<br>",
         "<b>SIMCE 4° básico:</b> ", simce_txt(año, simce_4basico_lectura, simce_4basico_matematica), "<br>",
         "<b>SIMCE 2° medio:</b> ", simce_txt(año, simce_2medio_lectura, simce_2medio_matematica),
-        ifelse(!is.na(slep), "<br><i>Ingresos y deuda: SLEP completo</i>", "")),
+        ifelse(grepl("parcial", fuente_financiera),
+               "<br><i>Año de traspaso: ingresos de solo una parte del año</i>",
+               ifelse(!is.na(slep), "<br><i>Ingresos y deuda: SLEP completo</i>", ""))),
       # versiones cortas para la ficha por comuna
       f_ingreso = coalesce(fmt_millones(ingreso_total_educ_pesos), "s/d"),
-      f_deuda   = case_when(!is.na(deuda_flotante_educ_devengado) ~ fmt_millones(deuda_flotante_educ_devengado),
-                            grepl("^Corporaci", modalidad_administrativa) ~ "No registrada (Corp.)",
-                            TRUE ~ "s/d"),
+      f_deuda   = txt_deuda(deuda_flotante_educ_devengado, modalidad_administrativa, corto = TRUE),
       f_simce4  = ifelse(as.character(año) %in% names(simce_sin_puntaje), "Sin SIMCE",
                          simce_txt(año, simce_4basico_lectura, simce_4basico_matematica)),
       f_simce2  = ifelse(as.character(año) %in% names(simce_sin_puntaje), "Sin SIMCE",
@@ -104,15 +114,16 @@ if (file.exists(archivo_rm)) {
       n_ingreso = ingreso_total_educ_pesos,
       n_s4l = simce_4basico_lectura, n_s4m = simce_4basico_matematica,
       n_s2l = simce_2medio_lectura,  n_s2m = simce_2medio_matematica)
-  nac <- nac %>%
-    mutate(k = normalizar(nombre_comuna)) %>%
-    left_join(rm_extra, by = c("k", "año")) %>%
+  usa_codigo <- !all(grepl("[A-Z]", rm_extra$k))
+  nac <- nac |>
+    mutate(k = if (usa_codigo) codigo_comuna else normalizar(nombre_comuna)) |>
+    left_join(rm_extra, by = c("k", "año")) |>
     mutate(administracion = coalesce(adm_rm, administracion),
-           nombre_slep    = ifelse(codigo_region == "13", slep_rm, nombre_slep),
-           nombre_comuna  = coalesce(comuna_rm, nombre_comuna)) %>%   # con tildes
+           nombre_slep    = ifelse(is.na(extra), nombre_slep, slep_rm),
+           nombre_comuna  = coalesce(comuna_rm, nombre_comuna)) |>   # con tildes
     select(-k, -adm_rm, -slep_rm, -comuna_rm)
-  if (any(nac$codigo_region == "13" & is.na(nac$extra)))
-    warning("Hay comunas de la RM que no cruzaron con la planilla.")
+  if (usa_codigo && any(is.na(nac$extra)))
+    warning("Hay comunas que no cruzaron con la planilla.")
 }
 for (v in c("extra", "f_ingreso", "f_deuda", "f_simce4", "f_simce2"))
   if (is.null(nac[[v]])) nac[[v]] <- NA_character_
@@ -127,7 +138,7 @@ nombres_region <- c("01" = "Tarapacá", "02" = "Antofagasta", "03" = "Atacama", 
 nac$nombre_region <- unname(nombres_region[nac$codigo_region])
 
 ## ---- comunas (hover y color por año) ----
-comunas <- nac %>%
+comunas <- nac |>
   mutate(
     txt_adm = ifelse(administracion == "SLEP",
                      paste0("SLEP ", coalesce(nombre_slep, "(nombre s/d)")),
@@ -144,8 +155,8 @@ comunas <- nac %>%
   )
 
 ## ---- fichas (trayectoria por comuna, al hacer clic) ----
-fichas <- comunas %>%
-  arrange(codigo_comuna, año) %>%
+fichas <- comunas |>
+  arrange(codigo_comuna, año) |>
   transmute(
     codigo_comuna, nombre_comuna, anio = año,
     adm = ifelse(administracion == "SLEP", paste0("SLEP ", coalesce(nombre_slep, "")),
@@ -156,14 +167,14 @@ fichas <- comunas %>%
   )
 # Series numéricas para comparar comunas. El ingreso por estudiante de un SLEP se calcula
 # sobre la matrícula pública de TODO su territorio (el ingreso es del servicio completo)
-series <- comunas %>%
-  group_by(año, nombre_slep_g = ifelse(administracion == "SLEP", nombre_slep, NA)) %>%
-  mutate(mat_territorio = ifelse(is.na(nombre_slep_g), matricula_publica, sum(matricula_publica))) %>%
-  ungroup() %>%
-  arrange(codigo_comuna, año) %>%
-  group_by(codigo_comuna) %>%
-  mutate(g = if (any(administracion == "SLEP")) min(año[administracion == "SLEP"]) else NA_real_) %>%
-  ungroup() %>%
+series <- comunas |>
+  group_by(año, nombre_slep_g = ifelse(administracion == "SLEP", nombre_slep, NA)) |>
+  mutate(mat_territorio = ifelse(is.na(nombre_slep_g), matricula_publica, sum(matricula_publica))) |>
+  ungroup() |>
+  arrange(codigo_comuna, año) |>
+  group_by(codigo_comuna) |>
+  mutate(g = if (any(administracion == "SLEP")) min(año[administracion == "SLEP"]) else NA_real_) |>
+  ungroup() |>
   transmute(codigo_comuna, nombre_region, g, anio = año,
             mat_pub = matricula_publica,
             pct_pub = round(100 * matricula_publica / pmax(matricula_total, 1), 1),
@@ -186,8 +197,8 @@ fichas <- lapply(split(fichas, fichas$codigo_comuna), function(d) {
 })
 
 ## ---- regiones (resumen por año) ----
-regiones <- comunas %>%
-  group_by(codigo_region, nombre_region, año) %>%
+regiones <- comunas |>
+  group_by(codigo_region, nombre_region, año) |>
   summarise(
     n_comunas = n(),
     n_slep    = sum(administracion == "SLEP"),
@@ -195,7 +206,7 @@ regiones <- comunas %>%
     mat_slep  = sum(matricula_slep),
     sleps     = paste(sort(unique(na.omit(nombre_slep))), collapse = ", "),
     .groups = "drop"
-  ) %>%
+  ) |>
   mutate(
     pct_slep = round(100 * mat_slep / pmax(mat_pub, 1)),
     hover = paste0(
@@ -209,8 +220,8 @@ regiones <- comunas %>%
 ## ---- geometria ----
 # Los polígonos se pasan como coordenadas (x = longitud, y = latitud) y se dibujan
 # como áreas rellenas: no depende de mapas base externos (funciona sin internet).
-simplificar <- function(x, tol) x %>% st_transform(32719) %>%
-  st_simplify(dTolerance = tol, preserveTopology = TRUE) %>% st_transform(4326)
+simplificar <- function(x, tol) x |> st_transform(32719) |>
+  st_simplify(dTolerance = tol, preserveTopology = TRUE) |> st_transform(4326)
 a_coords <- function(g) {
   # Une todos los anillos de un (multi)polígono, separados por NA (= null en JS)
   m <- st_coordinates(g)
@@ -228,13 +239,13 @@ sin_islas <- function(g) {
   if (!any(lejos)) return(g)
   st_combine(partes[!lejos])[[1]]
 }
-geo_com <- st_as_sf(mapa_comunas) %>%
-  filter(!codigo_comuna %in% names(comunas_no_dibujadas)) %>%
+geo_com <- st_as_sf(mapa_comunas) |>
+  filter(!codigo_comuna %in% names(comunas_no_dibujadas)) |>
   select(id = codigo_comuna, region = codigo_region)
 st_geometry(geo_com) <- st_sfc(lapply(st_geometry(geo_com), sin_islas), crs = st_crs(geo_com))
 geo_com <- st_make_valid(geo_com)
 # Regiones = unión de sus comunas (no depende de rmapshaper)
-geo_reg <- geo_com %>% group_by(id = region) %>% summarise(.groups = "drop")
+geo_reg <- geo_com |> group_by(id = region) |> summarise(.groups = "drop")
 
 pol_com <- a_lista(simplificar(geo_com, 250))
 pol_reg <- a_lista(simplificar(geo_reg, 2000))
@@ -250,7 +261,7 @@ datos_js <- list(
   pol_reg = pol_reg,
   pol_com = pol_com,
   reg     = por_anio(regiones, c("codigo_region", "pct_slep", "hover")),
-  com     = por_anio(comunas %>% filter(codigo_comuna %in% geo_com$id),
+  com     = por_anio(comunas |> filter(codigo_comuna %in% geo_com$id),
                      c("codigo_comuna", "codigo_region", "color", "hover")),
   nombres_reg  = setNames(as.list(unique(regiones$nombre_region)), unique(regiones$codigo_region)),
   colores      = as.list(colores_adm),
@@ -261,11 +272,11 @@ datos_js <- list(
 ## ---- mapa ----
 # El widget parte vacío; el JavaScript dibuja la vista nacional o regional
 widget <- plot_ly(type = "scatter", mode = "lines", x = numeric(0), y = numeric(0),
-                  height = 820) %>%
+                  height = 820) |>
   layout(font = list(family = "Titillium Web"),
          margin = list(l = 0, r = 0, t = 10, b = 0),
          hoverlabel = list(bgcolor = "#FAF7F0", align = "left",
-                           font = list(family = "Titillium Web", size = 12))) %>%
+                           font = list(family = "Titillium Web", size = 12))) |>
   # Botones de zoom (+, −, encuadre inicial) para comunas pequeñas; doble clic también
   # vuelve al encuadre de la región. En celular se puede además pellizcar la pantalla
   config(displaylogo = FALSE, displayModeBar = TRUE, scrollZoom = FALSE,
@@ -397,7 +408,7 @@ function(el, x, D) {
       }).join('') + '</select></div>' +
       '<div class=\"grafico\" style=\"width:100%;height:320px\"></div>' +
       '<div style=\"color:#777;font-size:12px\">Rombo: año de traspaso a SLEP. Línea vertical: año del control.' +
-      (VARIABLES[estado.variable].rm ? ' Por ahora estos datos solo existen para la Región Metropolitana.' : '') +
+
       (estado.variable.indexOf('ingreso') === 0 ? ' En un SLEP, el ingreso es del servicio completo; el ingreso por estudiante usa la matrícula pública de todo su territorio.' : '') +
       (estado.variable.charAt(0) === 's' ? ' Sin SIMCE comparable 2019-2021.' : '') + '</div>';
     comp.innerHTML = h; comp.style.display = '';
@@ -493,8 +504,7 @@ function(el, x, D) {
       $('leyenda').innerHTML = Object.keys(D.colores).map(function(k) { return caja(D.colores[k], k); }).join('');
       nota.innerHTML = (estado.region === '05' ? 'No se dibujan ' + D.no_dibujadas.join(' ni ') +
         ' (islas oceánicas). ' : '') +
-        (estado.region === '13' ? 'RM: incluye ingresos, deuda flotante y SIMCE de la planilla única.'
-                                : 'Fuera de la RM, por ahora solo administración y matrícula (Mineduc).') +
+        'Montos en pesos de 2025; en un SLEP, ingresos y deuda son del servicio completo.' +
         ' Haz clic en una comuna para ver su ficha.';
     }
     gd._ids = ids;
